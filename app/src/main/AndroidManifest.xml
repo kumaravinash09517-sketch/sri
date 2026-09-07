@@ -30,7 +30,15 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
-        <activity android:name=".PermissionActivity" android:exported="true" />
+        <!-- Launcher activity -->
+        <activity
+            android:name=".PermissionActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
 
     </application>
 </manifest>
