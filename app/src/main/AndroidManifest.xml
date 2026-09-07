@@ -2,22 +2,16 @@
 <manifest package="com.blurr.voice.v2"
     xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Permissions -->
+    <!-- Minimal required permissions left in place -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:allowBackup="true"
         android:label="Sarkar AI Receptionist"
         android:icon="@android:drawable/sym_def_app_icon">
 
-        <!-- Accessibility service declaration -->
+        <!-- Accessibility service declaration: keep meta-data reference only if the xml exists. -->
         <service
             android:name=".AgentService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
@@ -25,12 +19,14 @@
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
             </intent-filter>
+            <!-- If res/xml/accessibility_service_config.xml is missing, this meta-data is harmless but
+                 you should add a valid config if you intend to enable the service later. -->
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
-        <!-- Launcher activity -->
+        <!-- Launcher activity (safe, minimal UI) -->
         <activity
             android:name=".PermissionActivity"
             android:exported="true">
