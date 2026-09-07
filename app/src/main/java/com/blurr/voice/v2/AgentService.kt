@@ -10,13 +10,16 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
+import android.os.Bundle
 import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
+import java.util.*
 
 /**
  * AccessibilityService that boots the Agent loop and manages foreground boundaries, notifications,
@@ -38,6 +41,9 @@ class AgentService : AccessibilityService() {
     private var listeningIntent: Intent? = null
     private var overlay: OverlayHUD? = null
 
+    // Text-to-Speech
+    private var tts: TextToSpeech? = null
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
@@ -51,6 +57,7 @@ class AgentService : AccessibilityService() {
         agent = Agent(this, scope)
         agent?.start()
         initOverlay()
+        initTts()
         initSpeechRecognizer()
         startListeningSafe()
     }
@@ -65,6 +72,8 @@ class AgentService : AccessibilityService() {
         try {
             stopListeningSafe()
             destroySpeechRecognizer()
+            tts?.stop()
+            tts?.shutdown()
             overlay?.hide()
             agent?.stop()
             scope.cancel()
@@ -162,12 +171,52 @@ class AgentService : AccessibilityService() {
     private fun initOverlay() {
         try {
             overlay = OverlayHUD(this.applicationContext)
-            if (Settings.canDrawOverlays(this)) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this)) {
                 overlay?.show()
             }
         } catch (t: Throwable) {
             Log.w(TAG, "initOverlay failed: ${t.localizedMessage}")
             overlay = null
+        }
+    }
+
+    // Text-to-Speech
+    private fun initTts() {
+        try {
+            tts = TextToSpeech(applicationContext) { status ->
+                try {
+                    if (status == TextToSpeech.SUCCESS) {
+                        val res = tts?.setLanguage(Locale.getDefault())
+                        Log.i(TAG, "TTS initialized, language set result: $res")
+                    } else {
+                        Log.w(TAG, "TTS initialization failed: status=$status")
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "TTS setup error: ${t.localizedMessage}")
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "initTts failed: ${t.localizedMessage}")
+            tts = null
+        }
+    }
+
+    // Speak and show on overlay + notification
+    fun speakAndShow(text: String) {
+        try {
+            val display = "Response: ${text.trim()}"
+            overlay?.update(display)
+            updateNotification(display)
+            try {
+                val utteranceId = UUID.randomUUID().toString()
+                tts?.let { t ->
+                    t.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "TTS speak failed: ${t.localizedMessage}")
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "speakAndShow failed: ${t.localizedMessage}")
         }
     }
 

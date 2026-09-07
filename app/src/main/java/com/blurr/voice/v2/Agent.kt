@@ -176,6 +176,51 @@ class Agent(private val service: AccessibilityService, private val externalScope
             listOf(ScreenAction.Done)
         }
     }
+
+    /**
+     * Process speech recognized by the on-device recognizer. This method drives the THINK step
+     * immediately: it queries the LLM/local engine and either speaks a conversational answer
+     * (and stops the agent loop) or parses and executes actions via the ActionExecutor.
+     */
+    fun processUserSpeech(userText: String) {
+        try {
+            val scopeToUse = externalScope ?: CoroutineScope(Dispatchers.Default)
+            scopeToUse.launch {
+                try {
+                    val screen = try { perceive(service) } catch (t: Throwable) { Log.w(TAG, "perceive failed: ${t.localizedMessage}"); ScreenAnalysis() }
+                    val prompt = "UserSpeech: ${userText.trim()}\nScreenTitle: ${screen.title}\nScreenSummary: ${screen.textSummary}\nPlease provide a direct answer or a list of actions."
+                    val response = try { api.queryTextResponse(prompt, screen) } catch (t: Throwable) { Log.w(TAG, "LLM during processUserSpeech failed: ${t.localizedMessage}"); null }
+
+                    if (!response.isNullOrBlank()) {
+                        if (looksConversational(response)) {
+                            Log.i(TAG, "Conversational response: $response")
+                            state.stopped = true
+                            // Speak and show using the service overlay/tts
+                            try {
+                                (service as? AgentService)?.speakAndShow(response)
+                            } catch (t: Throwable) {
+                                Log.w(TAG, "speakAndShow failed: ${t.localizedMessage}")
+                            }
+                        } else {
+                            // Non-conversational: parse actions and execute
+                            val actions = parseActionsSafely(response)
+                            for (act in actions) {
+                                val ok = executor.execute(act)
+                                if (!ok) break
+                                if (state.stopped) break
+                            }
+                        }
+                    } else {
+                        Log.w(TAG, "Empty response from LLM for user speech")
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "processUserSpeech error: ${t.localizedMessage}")
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "processUserSpeech launch failed: ${t.localizedMessage}")
+        }
+    }
 }
 
 data class AgentState(var stopped: Boolean = false)
