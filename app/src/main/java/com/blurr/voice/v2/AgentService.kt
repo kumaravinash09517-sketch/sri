@@ -10,6 +10,8 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -26,9 +28,8 @@ import java.util.*
  * AccessibilityService that boots the Agent loop and manages foreground boundaries, notifications,
  * permission prompts, and an on-device offline speech recognizer.
  *
- * The service posts a persistent notification and attempts to show a small overlay HUD (if overlay
- * permission is granted) to show live "Listening: ..." partial results. If overlay is not available
- * it falls back to updating the notification content text.
+ * Defensive: initializes TTS and SpeechRecognizer on the main thread, protects against
+ * lifecycle races, and guards all external calls to avoid uncaught exceptions.
  */
 class AgentService : AccessibilityService() {
     private val TAG = "AgentService"
@@ -46,6 +47,8 @@ class AgentService : AccessibilityService() {
     private var tts: TextToSpeech? = null
     @Volatile private var isTtsSpeaking: Boolean = false
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
@@ -56,8 +59,12 @@ class AgentService : AccessibilityService() {
         super.onServiceConnected()
         Log.i(TAG, "Accessibility service connected")
         startForegroundSafe()
-        agent = Agent(this, scope)
-        agent?.start()
+        try {
+            agent = Agent(this, scope)
+            agent?.start()
+        } catch (t: Throwable) {
+            Log.w(TAG, "Failed to start Agent: ${t.localizedMessage}")
+        }
         initOverlay()
         initTts()
         initSpeechRecognizer()
@@ -65,13 +72,11 @@ class AgentService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
-        // AccessibilityService requires onInterrupt; keep minimal to satisfy abstract contract.
         Log.w(TAG, "AccessibilityService interrupted")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // No-op: this service performs global listening and acts on explicit speech input.
-        // Implementers may inspect events if needed in future.
+        // No-op for now.
     }
 
     override fun onDestroy() {
@@ -79,9 +84,20 @@ class AgentService : AccessibilityService() {
         Log.i(TAG, "Service onDestroy")
         try {
             stopListeningSafe()
+            // Ensure tts shutdown on main thread
+            try {
+                mainHandler.post {
+                    try {
+                        tts?.stop()
+                        tts?.shutdown()
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "TTS shutdown error on main thread: ${t.localizedMessage}")
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Error posting TTS shutdown to main thread: ${t.localizedMessage}")
+            }
             destroySpeechRecognizer()
-            tts?.stop()
-            tts?.shutdown()
             overlay?.hide()
             agent?.stop()
             scope.cancel()
@@ -186,56 +202,64 @@ class AgentService : AccessibilityService() {
     // Text-to-Speech
     private fun initTts() {
         try {
-            tts = TextToSpeech(applicationContext) { status ->
+            // Ensure initialization happens on main thread
+            mainHandler.post {
                 try {
-                    if (status == TextToSpeech.SUCCESS) {
-                        val res = tts?.setLanguage(Locale.getDefault())
-                        Log.i(TAG, "TTS initialized, language set result: $res")
-                        // Attach utterance listener to pause/resume recognizer
+                    tts = TextToSpeech(applicationContext) { status ->
                         try {
-                            tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                                override fun onStart(utteranceId: String?) {
-                                    isTtsSpeaking = true
-                                    Log.d(TAG, "TTS onStart: $utteranceId")
-                                    // Stop recognizer while speaking
-                                    stopListeningSafe()
-                                }
-
-                                override fun onDone(utteranceId: String?) {
-                                    isTtsSpeaking = false
-                                    Log.d(TAG, "TTS onDone: $utteranceId")
-                                    // Resume listening only if agent isn't stopped
-                                    scope.launch {
-                                        delay(300)
-                                        try {
-                                            if (agent?.state?.stopped != true) startListeningSafe()
-                                        } catch (t: Throwable) {
-                                            Log.w(TAG, "resume listening after TTS failed: ${t.localizedMessage}")
+                            if (status == TextToSpeech.SUCCESS) {
+                                val res = tts?.setLanguage(Locale.getDefault())
+                                Log.i(TAG, "TTS initialized, language set result: $res")
+                                // Attach utterance listener to pause/resume recognizer
+                                try {
+                                    tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                                        override fun onStart(utteranceId: String?) {
+                                            isTtsSpeaking = true
+                                            Log.d(TAG, "TTS onStart: $utteranceId")
+                                            // Stop recognizer while speaking
+                                            stopListeningSafe()
                                         }
-                                    }
-                                }
 
-                                override fun onError(utteranceId: String?) {
-                                    isTtsSpeaking = false
-                                    Log.w(TAG, "TTS onError: $utteranceId")
-                                    scope.launch {
-                                        delay(300)
-                                        try {
-                                            if (agent?.state?.stopped != true) startListeningSafe()
-                                        } catch (t: Throwable) {
-                                            Log.w(TAG, "resume listening after TTS error failed: ${t.localizedMessage}")
+                                        override fun onDone(utteranceId: String?) {
+                                            isTtsSpeaking = false
+                                            Log.d(TAG, "TTS onDone: $utteranceId")
+                                            // Resume listening only if agent isn't stopped
+                                            scope.launch {
+                                                delay(300)
+                                                try {
+                                                    if (agent?.state?.stopped != true) startListeningSafe()
+                                                } catch (t: Throwable) {
+                                                    Log.w(TAG, "resume listening after TTS failed: ${t.localizedMessage}")
+                                                }
+                                            }
                                         }
-                                    }
+
+                                        override fun onError(utteranceId: String?) {
+                                            isTtsSpeaking = false
+                                            Log.w(TAG, "TTS onError: $utteranceId")
+                                            scope.launch {
+                                                delay(300)
+                                                try {
+                                                    if (agent?.state?.stopped != true) startListeningSafe()
+                                                } catch (t: Throwable) {
+                                                    Log.w(TAG, "resume listening after TTS error failed: ${t.localizedMessage}")
+                                                }
+                                            }
+                                        }
+                                    })
+                                } catch (t: Throwable) {
+                                    Log.w(TAG, "setOnUtteranceProgressListener failed: ${t.localizedMessage}")
                                 }
-                            })
+                            } else {
+                                Log.w(TAG, "TTS initialization failed: status=$status")
+                            }
                         } catch (t: Throwable) {
-                            Log.w(TAG, "setOnUtteranceProgressListener failed: ${t.localizedMessage}")
+                            Log.w(TAG, "TTS setup error: ${t.localizedMessage}")
                         }
-                    } else {
-                        Log.w(TAG, "TTS initialization failed: status=$status")
                     }
                 } catch (t: Throwable) {
-                    Log.w(TAG, "TTS setup error: ${t.localizedMessage}")
+                    Log.w(TAG, "init TTS creation failed on main thread: ${t.localizedMessage}")
+                    tts = null
                 }
             }
         } catch (t: Throwable) {
@@ -248,14 +272,32 @@ class AgentService : AccessibilityService() {
     fun speakAndShow(text: String) {
         try {
             val display = "Response: ${text.trim()}"
-            overlay?.update(display)
-            updateNotification(display)
+            // Update UI on main thread
+            mainHandler.post {
+                try {
+                    overlay?.update(display)
+                    updateNotification(display)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "speakAndShow UI update failed: ${t.localizedMessage}")
+                }
+            }
             try {
                 // Ensure recognizer is paused before speaking
                 stopListeningSafe()
                 val utteranceId = UUID.randomUUID().toString()
-                tts?.let { t ->
-                    t.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+                // Speak on main thread
+                mainHandler.post {
+                    try {
+                        tts?.let { t ->
+                            try {
+                                t.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+                            } catch (t: Throwable) {
+                                Log.w(TAG, "TTS speak call failed: ${t.localizedMessage}")
+                            }
+                        } ?: Log.w(TAG, "speakAndShow: TTS is null, cannot speak")
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "Error during TTS speak post: ${t.localizedMessage}")
+                    }
                 }
             } catch (t: Throwable) {
                 Log.w(TAG, "TTS speak failed: ${t.localizedMessage}")
@@ -268,81 +310,92 @@ class AgentService : AccessibilityService() {
     // Speech recognizer integration
     private fun initSpeechRecognizer() {
         try {
-            if (SpeechRecognizer.isRecognitionAvailable(this)) {
-                speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
-                    setRecognitionListener(object : RecognitionListener {
-                        override fun onReadyForSpeech(params: Bundle?) {
-                            Log.d(TAG, "onReadyForSpeech")
-                        }
+            mainHandler.post {
+                try {
+                    if (SpeechRecognizer.isRecognitionAvailable(this)) {
+                        try {
+                            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
+                                setRecognitionListener(object : RecognitionListener {
+                                    override fun onReadyForSpeech(params: Bundle?) {
+                                        Log.d(TAG, "onReadyForSpeech")
+                                    }
 
-                        override fun onBeginningOfSpeech() {
-                            Log.d(TAG, "onBeginningOfSpeech")
-                        }
+                                    override fun onBeginningOfSpeech() {
+                                        Log.d(TAG, "onBeginningOfSpeech")
+                                    }
 
-                        override fun onRmsChanged(rmsdB: Float) {}
+                                    override fun onRmsChanged(rmsdB: Float) {}
 
-                        override fun onBufferReceived(buffer: ByteArray?) {}
+                                    override fun onBufferReceived(buffer: ByteArray?) {}
 
-                        override fun onEndOfSpeech() {
-                            Log.d(TAG, "onEndOfSpeech")
-                        }
+                                    override fun onEndOfSpeech() {
+                                        Log.d(TAG, "onEndOfSpeech")
+                                    }
 
-                        override fun onError(error: Int) {
-                            Log.w(TAG, "SpeechRecognizer error: $error")
-                            // restart listening after a small delay to be resilient
-                            scope.launch {
-                                delay(500)
-                                // Only restart if not speaking via TTS
-                                try {
-                                    if (!isTtsSpeaking && agent?.state?.stopped != true) startListeningSafe()
-                                } catch (t: Throwable) {
-                                    Log.w(TAG, "restart listening after error failed: ${t.localizedMessage}")
-                                }
+                                    override fun onError(error: Int) {
+                                        Log.w(TAG, "SpeechRecognizer error: $error")
+                                        // restart listening after a small delay to be resilient
+                                        scope.launch {
+                                            delay(500)
+                                            // Only restart if not speaking via TTS
+                                            try {
+                                                if (!isTtsSpeaking && agent?.state?.stopped != true) startListeningSafe()
+                                            } catch (t: Throwable) {
+                                                Log.w(TAG, "restart listening after error failed: ${t.localizedMessage}")
+                                            }
+                                        }
+                                    }
+
+                                    override fun onResults(results: Bundle?) {
+                                        val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                                        val text = matches?.firstOrNull() ?: ""
+                                        Log.i(TAG, "onResults: $text")
+                                        overlay?.update("Listening: $text")
+                                        updateNotification("Listening: $text")
+                                        // Forward final recognized speech to agent for THINK
+                                        try {
+                                            agent?.processUserSpeech(text)
+                                        } catch (t: Throwable) {
+                                            Log.w(TAG, "processUserSpeech failed: ${t.localizedMessage}")
+                                        }
+                                        // Restart listening if not speaking
+                                        scope.launch {
+                                            delay(300)
+                                            try {
+                                                if (!isTtsSpeaking && agent?.state?.stopped != true) startListeningSafe()
+                                            } catch (t: Throwable) {
+                                                Log.w(TAG, "restart listening after results failed: ${t.localizedMessage}")
+                                            }
+                                        }
+                                    }
+
+                                    override fun onPartialResults(partialResults: Bundle?) {
+                                        val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                                        val text = partial?.firstOrNull() ?: ""
+                                        Log.d(TAG, "onPartialResults: $text")
+                                        overlay?.update("Listening: $text")
+                                        updateNotification("Listening: $text")
+                                    }
+
+                                    override fun onEvent(eventType: Int, params: Bundle?) {}
+                                })
                             }
-                        }
 
-                        override fun onResults(results: Bundle?) {
-                            val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                            val text = matches?.firstOrNull() ?: ""
-                            Log.i(TAG, "onResults: $text")
-                            overlay?.update("Listening: $text")
-                            updateNotification("Listening: $text")
-                            // Forward final recognized speech to agent for THINK
-                            try {
-                                agent?.processUserSpeech(text)
-                            } catch (t: Throwable) {
-                                Log.w(TAG, "processUserSpeech failed: ${t.localizedMessage}")
+                            listeningIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
                             }
-                            // Restart listening if not speaking
-                            scope.launch {
-                                delay(300)
-                                try {
-                                    if (!isTtsSpeaking && agent?.state?.stopped != true) startListeningSafe()
-                                } catch (t: Throwable) {
-                                    Log.w(TAG, "restart listening after results failed: ${t.localizedMessage}")
-                                }
-                            }
+                        } catch (t: Throwable) {
+                            Log.w(TAG, "Failed to create SpeechRecognizer instance: ${t.localizedMessage}")
+                            destroySpeechRecognizer()
                         }
-
-                        override fun onPartialResults(partialResults: Bundle?) {
-                            val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                            val text = partial?.firstOrNull() ?: ""
-                            Log.d(TAG, "onPartialResults: $text")
-                            overlay?.update("Listening: $text")
-                            updateNotification("Listening: $text")
-                        }
-
-                        override fun onEvent(eventType: Int, params: Bundle?) {}
-                    })
+                    } else {
+                        Log.w(TAG, "Speech recognition not available on this device")
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "initSpeechRecognizer inner failed: ${t.localizedMessage}")
                 }
-
-                listeningIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                    putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                    putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-                }
-            } else {
-                Log.w(TAG, "Speech recognition not available on this device")
             }
         } catch (t: Throwable) {
             Log.w(TAG, "initSpeechRecognizer failed: ${t.localizedMessage}")
@@ -352,10 +405,19 @@ class AgentService : AccessibilityService() {
 
     private fun startListeningSafe() {
         try {
+            if (isTtsSpeaking) return
             val sr = speechRecognizer
             val intent = listeningIntent
             if (sr != null && intent != null) {
-                sr.startListening(intent)
+                mainHandler.post {
+                    try {
+                        sr.startListening(intent)
+                    } catch (t: SecurityException) {
+                        Log.w(TAG, "startListeningSafe SecurityException: ${t.localizedMessage}")
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "startListeningSafe failed on main thread: ${t.localizedMessage}")
+                    }
+                }
             }
         } catch (t: Throwable) {
             Log.w(TAG, "startListeningSafe failed: ${t.localizedMessage}")
@@ -364,7 +426,15 @@ class AgentService : AccessibilityService() {
 
     private fun stopListeningSafe() {
         try {
-            speechRecognizer?.cancel()
+            speechRecognizer?.let { sr ->
+                mainHandler.post {
+                    try {
+                        sr.cancel()
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "stopListeningSafe cancel failed: ${t.localizedMessage}")
+                    }
+                }
+            }
         } catch (t: Throwable) {
             Log.w(TAG, "stopListeningSafe failed: ${t.localizedMessage}")
         }
@@ -372,7 +442,16 @@ class AgentService : AccessibilityService() {
 
     private fun destroySpeechRecognizer() {
         try {
-            speechRecognizer?.destroy()
+            speechRecognizer?.let { sr ->
+                mainHandler.post {
+                    try {
+                        sr.cancel()
+                    } catch (_: Throwable) {}
+                    try {
+                        sr.destroy()
+                    } catch (_: Throwable) {}
+                }
+            }
             speechRecognizer = null
             listeningIntent = null
         } catch (t: Throwable) {

@@ -11,28 +11,31 @@ import android.widget.Button
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
 
 /**
  * Lightweight PermissionActivity that guides the user through runtime permission granting
- * for RECORD_AUDIO, overlay, and accessibility enabling. It is intentionally minimal and
- * resilient to missing permissions.
+ * for RECORD_AUDIO, overlay, and accessibility enabling. This version is defensive and
+ * guards against SecurityException / NPE when interacting with system Settings and services.
  */
 class PermissionActivity : AppCompatActivity() {
     private val TAG = "PermissionActivity"
 
     private val requestAudioPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) {
-            Toast.makeText(this, "Audio permission granted", Toast.LENGTH_SHORT).show()
-        } else {
-            Toast.makeText(this, "Audio permission denied", Toast.LENGTH_SHORT).show()
+        try {
+            if (granted) {
+                Toast.makeText(this, "Audio permission granted", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Audio permission denied", Toast.LENGTH_SHORT).show()
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "audio permission callback failed: ${t.localizedMessage}")
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Minimal UI using buttons created programmatically to avoid layouts
+
+        // Minimal UI using buttons created programmatically to avoid layout inflation errors
         val btnAudio = Button(this).apply { text = "Grant Audio" }
         val btnOverlay = Button(this).apply { text = "Grant Overlay" }
         val btnAccessibility = Button(this).apply { text = "Open Accessibility Settings" }
@@ -48,7 +51,15 @@ class PermissionActivity : AppCompatActivity() {
         setContentView(layout)
 
         btnAudio.setOnClickListener {
-            requestAudioPermission.launch(Manifest.permission.RECORD_AUDIO)
+            try {
+                // Safe request; exact flow handled by the registered callback
+                requestAudioPermission.launch(Manifest.permission.RECORD_AUDIO)
+            } catch (t: SecurityException) {
+                Log.w(TAG, "SecurityException requesting audio permission: ${t.localizedMessage}")
+                Toast.makeText(this, "Unable to request audio permission", Toast.LENGTH_SHORT).show()
+            } catch (t: Throwable) {
+                Log.w(TAG, "Unexpected error requesting audio permission: ${t.localizedMessage}")
+            }
         }
 
         btnOverlay.setOnClickListener {
@@ -63,6 +74,9 @@ class PermissionActivity : AppCompatActivity() {
                 } else {
                     Toast.makeText(this, "Overlay permission not required on this OS", Toast.LENGTH_SHORT).show()
                 }
+            } catch (t: SecurityException) {
+                Log.w(TAG, "SecurityException opening overlay settings: ${t.localizedMessage}")
+                Toast.makeText(this, "Unable to open overlay settings", Toast.LENGTH_SHORT).show()
             } catch (t: Throwable) {
                 Log.w(TAG, "overlay click failed: ${t.localizedMessage}")
             }
@@ -72,6 +86,9 @@ class PermissionActivity : AppCompatActivity() {
             try {
                 val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
                 startActivity(intent)
+            } catch (t: SecurityException) {
+                Log.w(TAG, "SecurityException opening accessibility settings: ${t.localizedMessage}")
+                Toast.makeText(this, "Unable to open accessibility settings", Toast.LENGTH_SHORT).show()
             } catch (t: Throwable) {
                 Log.w(TAG, "failed to open accessibility settings: ${t.localizedMessage}")
             }

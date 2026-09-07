@@ -2,6 +2,7 @@ package com.blurr.voice.v2
 
 import android.content.Context
 import android.graphics.PixelFormat
+import android.os.Build
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
@@ -10,7 +11,7 @@ import android.widget.TextView
 
 /**
  * Lightweight overlay HUD shown via WindowManager (requires SYSTEM_ALERT_WINDOW permission).
- * If the permission isn't granted the caller should fall back to notification updates.
+ * Defensive: catches SecurityException and other view-related errors so callers can fall back.
  */
 class OverlayHUD(private val context: Context) {
     private var windowManager: WindowManager? = null
@@ -26,21 +27,24 @@ class OverlayHUD(private val context: Context) {
             tv.text = "Listening..."
             tv.setBackgroundColor(0x88000000.toInt())
             tv.setTextColor(0xFFFFFFFF.toInt())
+            val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O)
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                else
-                    WindowManager.LayoutParams.TYPE_PHONE,
+                layoutType,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
                 PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = Gravity.BOTTOM
                 y = 50
             }
-            windowManager?.addView(inflated, params)
-            view = inflated
+            try {
+                windowManager?.addView(inflated, params)
+                view = inflated
+            } catch (se: SecurityException) {
+                // overlay permission not granted or other security issue
+                view = null
+            }
         } catch (_: Throwable) {
             // ignore failures; caller will fallback
             view = null
@@ -57,7 +61,9 @@ class OverlayHUD(private val context: Context) {
     fun hide() {
         try {
             if (view != null) {
-                windowManager?.removeView(view)
+                try {
+                    windowManager?.removeView(view)
+                } catch (_: Throwable) {}
                 view = null
             }
         } catch (_: Throwable) {
