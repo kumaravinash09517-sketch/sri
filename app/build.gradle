@@ -3,6 +3,7 @@ apply plugin: 'kotlin-android'
 apply plugin: 'kotlin-kapt'
 
 android {
+    namespace "com.blurr.voice.v2"
     compileSdk 33
 
     defaultConfig {
