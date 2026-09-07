@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Sarkar AI Receptionist</string>
+    <string name="accessibility_service_description">Sarkar AI Receptionist Accessibility Service for screen reading and actions</string>
+</resources>
