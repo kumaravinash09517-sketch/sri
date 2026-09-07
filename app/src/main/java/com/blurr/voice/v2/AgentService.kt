@@ -40,4 +40,16 @@ class AgentService : AccessibilityService() {
         }
         super.onDestroy()
     }
+
+    /**
+     * Stubbed speakAndShow used by Agent.kt to display or speak responses.
+     * In this baseline it is a safe no-op that logs the input to avoid crashes.
+     */
+    fun speakAndShow(text: String) {
+        try {
+            Log.i(TAG, "speakAndShow (stub): ${text}")
+        } catch (t: Throwable) {
+            Log.w(TAG, "speakAndShow failed", t)
+        }
+    }
 }
