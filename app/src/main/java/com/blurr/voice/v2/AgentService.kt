@@ -28,8 +28,8 @@ import java.util.*
  * AccessibilityService that boots the Agent loop and manages foreground boundaries, notifications,
  * permission prompts, and an on-device offline speech recognizer.
  *
- * Defensive: initializes TTS and SpeechRecognizer on the main thread, protects against
- * lifecycle races, and guards all external calls to avoid uncaught exceptions.
+ * Emergency crash guards: wrap onCreate/onServiceConnected initialization in try-catch to
+ * prevent hard crashes and log stack traces for diagnosis.
  */
 class AgentService : AccessibilityService() {
     private val TAG = "AgentService"
@@ -50,25 +50,54 @@ class AgentService : AccessibilityService() {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onCreate() {
-        super.onCreate()
-        createNotificationChannel()
-        Log.i(TAG, "Service onCreate")
+        try {
+            super.onCreate()
+            createNotificationChannel()
+            Log.i(TAG, "Service onCreate")
+        } catch (t: Throwable) {
+            Log.e(TAG, "onCreate failed", t)
+        }
     }
 
     override fun onServiceConnected() {
-        super.onServiceConnected()
-        Log.i(TAG, "Accessibility service connected")
-        startForegroundSafe()
         try {
-            agent = Agent(this, scope)
-            agent?.start()
+            super.onServiceConnected()
+            Log.i(TAG, "Accessibility service connected")
+            startForegroundSafe()
+            try {
+                agent = Agent(this, scope)
+                agent?.start()
+            } catch (t: Throwable) {
+                Log.e(TAG, "Failed to start Agent", t)
+            }
+            initOverlay()
+            // Ensure TTS and SpeechRecognizer initialization happen on main looper
+            try {
+                if (Looper.myLooper() == Looper.getMainLooper()) {
+                    initTts()
+                    initSpeechRecognizer()
+                } else {
+                    mainHandler.post {
+                        try {
+                            initTts()
+                            initSpeechRecognizer()
+                        } catch (t: Throwable) {
+                            Log.e(TAG, "init TTS/SpeechRecognizer on main failed", t)
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "scheduling TTS/SpeechRecognizer init failed", t)
+            }
+            // start listening safely (it will guard against nulls and TTS speaking)
+            try {
+                startListeningSafe()
+            } catch (t: Throwable) {
+                Log.e(TAG, "startListeningSafe call failed", t)
+            }
         } catch (t: Throwable) {
-            Log.w(TAG, "Failed to start Agent: ${t.localizedMessage}")
+            Log.e(TAG, "onServiceConnected failed", t)
         }
-        initOverlay()
-        initTts()
-        initSpeechRecognizer()
-        startListeningSafe()
     }
 
     override fun onInterrupt() {
@@ -80,9 +109,9 @@ class AgentService : AccessibilityService() {
     }
 
     override fun onDestroy() {
-        super.onDestroy()
-        Log.i(TAG, "Service onDestroy")
         try {
+            super.onDestroy()
+            Log.i(TAG, "Service onDestroy")
             stopListeningSafe()
             // Ensure tts shutdown on main thread
             try {
@@ -91,18 +120,18 @@ class AgentService : AccessibilityService() {
                         tts?.stop()
                         tts?.shutdown()
                     } catch (t: Throwable) {
-                        Log.w(TAG, "TTS shutdown error on main thread: ${t.localizedMessage}")
+                        Log.e(TAG, "TTS shutdown error on main thread", t)
                     }
                 }
             } catch (t: Throwable) {
-                Log.w(TAG, "Error posting TTS shutdown to main thread: ${t.localizedMessage}")
+                Log.e(TAG, "Error posting TTS shutdown to main thread", t)
             }
             destroySpeechRecognizer()
             overlay?.hide()
             agent?.stop()
             scope.cancel()
         } catch (t: Throwable) {
-            Log.e(TAG, "Error stopping agent: ${t.localizedMessage}")
+            Log.e(TAG, "onDestroy failed", t)
         }
     }
 
@@ -122,7 +151,7 @@ class AgentService : AccessibilityService() {
                 }
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "createNotificationChannel failed: ${t.localizedMessage}")
+            Log.e(TAG, "createNotificationChannel failed", t)
         }
     }
 
@@ -131,7 +160,7 @@ class AgentService : AccessibilityService() {
             val notification = buildNotification("Listening for commands")
             startForeground(NOTIF_ID, notification)
         } catch (t: Throwable) {
-            Log.e(TAG, "Failed to startForeground: ${t.localizedMessage}")
+            Log.e(TAG, "Failed to startForeground", t)
         }
     }
 
@@ -182,7 +211,7 @@ class AgentService : AccessibilityService() {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
             nm?.notify(NOTIF_ID, buildNotification(content))
         } catch (t: Throwable) {
-            Log.w(TAG, "updateNotification failed: ${t.localizedMessage}")
+            Log.e(TAG, "updateNotification failed", t)
         }
     }
 
@@ -194,7 +223,7 @@ class AgentService : AccessibilityService() {
                 overlay?.show()
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "initOverlay failed: ${t.localizedMessage}")
+            Log.e(TAG, "initOverlay failed", t)
             overlay = null
         }
     }
@@ -229,41 +258,41 @@ class AgentService : AccessibilityService() {
                                                 try {
                                                     if (agent?.state?.stopped != true) startListeningSafe()
                                                 } catch (t: Throwable) {
-                                                    Log.w(TAG, "resume listening after TTS failed: ${t.localizedMessage}")
+                                                    Log.e(TAG, "resume listening after TTS failed", t)
                                                 }
                                             }
                                         }
 
                                         override fun onError(utteranceId: String?) {
                                             isTtsSpeaking = false
-                                            Log.w(TAG, "TTS onError: $utteranceId")
+                                            Log.e(TAG, "TTS onError: $utteranceId")
                                             scope.launch {
                                                 delay(300)
                                                 try {
                                                     if (agent?.state?.stopped != true) startListeningSafe()
                                                 } catch (t: Throwable) {
-                                                    Log.w(TAG, "resume listening after TTS error failed: ${t.localizedMessage}")
+                                                    Log.e(TAG, "resume listening after TTS error failed", t)
                                                 }
                                             }
                                         }
                                     })
                                 } catch (t: Throwable) {
-                                    Log.w(TAG, "setOnUtteranceProgressListener failed: ${t.localizedMessage}")
+                                    Log.e(TAG, "setOnUtteranceProgressListener failed", t)
                                 }
                             } else {
                                 Log.w(TAG, "TTS initialization failed: status=$status")
                             }
                         } catch (t: Throwable) {
-                            Log.w(TAG, "TTS setup error: ${t.localizedMessage}")
+                            Log.e(TAG, "TTS setup error", t)
                         }
                     }
                 } catch (t: Throwable) {
-                    Log.w(TAG, "init TTS creation failed on main thread: ${t.localizedMessage}")
+                    Log.e(TAG, "init TTS creation failed on main thread", t)
                     tts = null
                 }
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "initTts failed: ${t.localizedMessage}")
+            Log.e(TAG, "initTts failed", t)
             tts = null
         }
     }
@@ -278,7 +307,7 @@ class AgentService : AccessibilityService() {
                     overlay?.update(display)
                     updateNotification(display)
                 } catch (t: Throwable) {
-                    Log.w(TAG, "speakAndShow UI update failed: ${t.localizedMessage}")
+                    Log.e(TAG, "speakAndShow UI update failed", t)
                 }
             }
             try {
@@ -292,18 +321,18 @@ class AgentService : AccessibilityService() {
                             try {
                                 t.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
                             } catch (t: Throwable) {
-                                Log.w(TAG, "TTS speak call failed: ${t.localizedMessage}")
+                                Log.e(TAG, "TTS speak call failed", t)
                             }
                         } ?: Log.w(TAG, "speakAndShow: TTS is null, cannot speak")
                     } catch (t: Throwable) {
-                        Log.w(TAG, "Error during TTS speak post: ${t.localizedMessage}")
+                        Log.e(TAG, "Error during TTS speak post", t)
                     }
                 }
             } catch (t: Throwable) {
-                Log.w(TAG, "TTS speak failed: ${t.localizedMessage}")
+                Log.e(TAG, "TTS speak failed", t)
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "speakAndShow failed: ${t.localizedMessage}")
+            Log.e(TAG, "speakAndShow failed", t)
         }
     }
 
@@ -341,7 +370,7 @@ class AgentService : AccessibilityService() {
                                             try {
                                                 if (!isTtsSpeaking && agent?.state?.stopped != true) startListeningSafe()
                                             } catch (t: Throwable) {
-                                                Log.w(TAG, "restart listening after error failed: ${t.localizedMessage}")
+                                                Log.e(TAG, "restart listening after error failed", t)
                                             }
                                         }
                                     }
@@ -356,7 +385,7 @@ class AgentService : AccessibilityService() {
                                         try {
                                             agent?.processUserSpeech(text)
                                         } catch (t: Throwable) {
-                                            Log.w(TAG, "processUserSpeech failed: ${t.localizedMessage}")
+                                            Log.e(TAG, "processUserSpeech failed", t)
                                         }
                                         // Restart listening if not speaking
                                         scope.launch {
@@ -364,7 +393,7 @@ class AgentService : AccessibilityService() {
                                             try {
                                                 if (!isTtsSpeaking && agent?.state?.stopped != true) startListeningSafe()
                                             } catch (t: Throwable) {
-                                                Log.w(TAG, "restart listening after results failed: ${t.localizedMessage}")
+                                                Log.e(TAG, "restart listening after results failed", t)
                                             }
                                         }
                                     }
@@ -387,18 +416,18 @@ class AgentService : AccessibilityService() {
                                 putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
                             }
                         } catch (t: Throwable) {
-                            Log.w(TAG, "Failed to create SpeechRecognizer instance: ${t.localizedMessage}")
+                            Log.e(TAG, "Failed to create SpeechRecognizer instance", t)
                             destroySpeechRecognizer()
                         }
                     } else {
                         Log.w(TAG, "Speech recognition not available on this device")
                     }
                 } catch (t: Throwable) {
-                    Log.w(TAG, "initSpeechRecognizer inner failed: ${t.localizedMessage}")
+                    Log.e(TAG, "initSpeechRecognizer inner failed", t)
                 }
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "initSpeechRecognizer failed: ${t.localizedMessage}")
+            Log.e(TAG, "initSpeechRecognizer failed", t)
             destroySpeechRecognizer()
         }
     }
@@ -413,14 +442,14 @@ class AgentService : AccessibilityService() {
                     try {
                         sr.startListening(intent)
                     } catch (t: SecurityException) {
-                        Log.w(TAG, "startListeningSafe SecurityException: ${t.localizedMessage}")
+                        Log.e(TAG, "startListeningSafe SecurityException", t)
                     } catch (t: Throwable) {
-                        Log.w(TAG, "startListeningSafe failed on main thread: ${t.localizedMessage}")
+                        Log.e(TAG, "startListeningSafe failed on main thread", t)
                     }
                 }
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "startListeningSafe failed: ${t.localizedMessage}")
+            Log.e(TAG, "startListeningSafe failed", t)
         }
     }
 
@@ -431,12 +460,12 @@ class AgentService : AccessibilityService() {
                     try {
                         sr.cancel()
                     } catch (t: Throwable) {
-                        Log.w(TAG, "stopListeningSafe cancel failed: ${t.localizedMessage}")
+                        Log.e(TAG, "stopListeningSafe cancel failed", t)
                     }
                 }
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "stopListeningSafe failed: ${t.localizedMessage}")
+            Log.e(TAG, "stopListeningSafe failed", t)
         }
     }
 
@@ -455,7 +484,7 @@ class AgentService : AccessibilityService() {
             speechRecognizer = null
             listeningIntent = null
         } catch (t: Throwable) {
-            Log.w(TAG, "destroySpeechRecognizer failed: ${t.localizedMessage}")
+            Log.e(TAG, "destroySpeechRecognizer failed", t)
         }
     }
 
