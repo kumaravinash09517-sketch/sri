@@ -9,7 +9,6 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
-import android.os.IBinder
 import android.os.Bundle
 import android.provider.Settings
 import android.speech.RecognitionListener
@@ -18,6 +17,7 @@ import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
+import android.view.accessibility.AccessibilityEvent
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
 import java.util.*
@@ -65,7 +65,13 @@ class AgentService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
+        // AccessibilityService requires onInterrupt; keep minimal to satisfy abstract contract.
         Log.w(TAG, "AccessibilityService interrupted")
+    }
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // No-op: this service performs global listening and acts on explicit speech input.
+        // Implementers may inspect events if needed in future.
     }
 
     override fun onDestroy() {
@@ -82,11 +88,6 @@ class AgentService : AccessibilityService() {
         } catch (t: Throwable) {
             Log.e(TAG, "Error stopping agent: ${t.localizedMessage}")
         }
-    }
-
-    override fun onBind(intent: Intent): IBinder? {
-        // AccessibilityService handles binding internally
-        return super.onBind(intent)
     }
 
     private fun createNotificationChannel() {
